@@ -167,6 +167,7 @@ const OMP_AGENT_DIR = process.env.OMP_CODING_AGENT_DIR || path.join(ALL_HOMES[0]
 const PI_SESSIONS_DIR = path.join(PI_AGENT_DIR, 'sessions');
 const OMP_SESSIONS_DIR = path.join(OMP_AGENT_DIR, 'sessions');
 const KIRO_DB = path.join(ALL_HOMES[0], 'Library', 'Application Support', 'kiro-cli', 'data.sqlite3');
+const KIRO_SESSIONS_DIR = path.join(ALL_HOMES[0], '.kiro', 'sessions', 'cli');
 const COPILOT_SESSION_DIR = path.join(ALL_HOMES[0], '.copilot', 'session-state');
 const COPILOT_JB_DIR = path.join(ALL_HOMES[0], '.copilot', 'jb');
 const KILO_DB = path.join(ALL_HOMES[0], '.local', 'share', 'kilo', 'kilo.db');
@@ -1840,6 +1841,102 @@ function loadKiroDetail(conversationId) {
   }
 }
 
+// ── Kiro CLI (new format: ~/.kiro/sessions/cli/, since ~May 2026) ─────────────
+
+function scanKiroCliSessions() {
+  const sessions = [];
+  if (!fs.existsSync(KIRO_SESSIONS_DIR)) return sessions;
+
+  let files;
+  try { files = fs.readdirSync(KIRO_SESSIONS_DIR, { withFileTypes: true }); } catch { return sessions; }
+
+  for (const entry of files) {
+    const f = entry.name;
+    // Reject symlinks so a crafted <uuid>.json link can't leak an out-of-tree
+    // file through the dashboard (matches the Claude reader's symlink guard).
+    if (entry.isSymbolicLink() || !entry.isFile()) continue;
+    if (!f.endsWith('.json')) continue;
+    const sessionId = f.slice(0, -5);
+    // skip if not a strict UUID name
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) continue;
+
+    try {
+      const meta = JSON.parse(fs.readFileSync(path.join(KIRO_SESSIONS_DIR, f), 'utf8'));
+      const createdMs = meta.created_at ? new Date(meta.created_at).getTime() : 0;
+      const updatedMs = meta.updated_at ? new Date(meta.updated_at).getTime() : 0;
+      const jsonlPath = path.join(KIRO_SESSIONS_DIR, sessionId + '.jsonl');
+      // Only trust a regular (non-symlink) events file; a symlinked .jsonl
+      // would otherwise be followed by loadKiroCliDetail's readFileSync.
+      let jsonlStat = null;
+      try { jsonlStat = fs.lstatSync(jsonlPath); } catch {}
+      const hasDetail = !!(jsonlStat && jsonlStat.isFile());
+      const fileSize = hasDetail ? jsonlStat.size : 0;
+
+      sessions.push({
+        id: sessionId,
+        tool: 'kiro',
+        format: 'kiro-cli',
+        project: meta.cwd || '',
+        project_short: (meta.cwd || '').replace(os.homedir(), '~'),
+        first_ts: createdMs || Date.now(),
+        last_ts: updatedMs || Date.now(),
+        messages: fileSize > 0 ? Math.max(2, Math.floor(fileSize / 3000)) : 0,
+        first_message: meta.title || '',
+        has_detail: hasDetail,
+        file_size: fileSize,
+        detail_messages: 0,
+      });
+    } catch {}
+  }
+
+  return sessions;
+}
+
+function loadKiroCliDetail(sessionId) {
+  // sessionId is untrusted here (resolved from a request param) — require a
+  // strict UUID before building the path to close a path-traversal vector.
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+    return { messages: [] };
+  }
+  const jsonlPath = path.join(KIRO_SESSIONS_DIR, sessionId + '.jsonl');
+  // Reject symlinks (and non-regular files) before reading so a crafted link
+  // named <uuid>.jsonl can't leak an out-of-tree file through the dashboard.
+  let jsonlStat;
+  try { jsonlStat = fs.lstatSync(jsonlPath); } catch { return { messages: [] }; }
+  if (!jsonlStat.isFile()) return { messages: [] };
+
+  const messages = [];
+  try {
+    const lines = fs.readFileSync(jsonlPath, 'utf8').split('\n');
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let entry;
+      try { entry = JSON.parse(line); } catch { continue; }
+
+      const { kind, data } = entry;
+      if (!data) continue;
+
+      if (kind === 'Prompt') {
+        // data.content is array of {kind, data} blocks
+        const text = (data.content || [])
+          .filter(b => b.kind === 'text')
+          .map(b => b.data || '')
+          .join('').trim();
+        if (text) messages.push({ role: 'user', content: text.slice(0, 2000), uuid: data.message_id || '' });
+
+      } else if (kind === 'AssistantMessage') {
+        const text = (data.content || [])
+          .filter(b => b.kind === 'text')
+          .map(b => b.data || '')
+          .join('').trim();
+        if (text) messages.push({ role: 'assistant', content: text.slice(0, 2000), uuid: data.message_id || '' });
+      }
+    }
+  } catch {}
+
+  return { messages: messages.slice(0, 200) };
+}
+
 // ── Copilot Chat (VS Code extension) ─────────────────────────
 
 // Build workspace-hash -> project path mapping for VS Code workspaceStorage
@@ -3471,6 +3568,14 @@ function loadSessions() {
     }
 } catch {}
 
+  // Load Kiro CLI sessions (new format: ~/.kiro/sessions/cli/, since ~May 2026)
+  try {
+    const kiroCliSessions = scanKiroCliSessions();
+    for (const ks of kiroCliSessions) {
+      sessions[ks.id] = ks;
+    }
+  } catch {}
+
 // Load Copilot CLI sessions
   try {
     const copilotSessions = scanCopilotCliSessions();
@@ -3740,6 +3845,9 @@ function loadSessionDetail(sessionId, project) {
   if (found.format === 'kiro') {
     return loadKiroDetail(sessionId);
   }
+  if (found.format === 'kiro-cli') {
+    return loadKiroCliDetail(sessionId);
+  }
 
 // Copilot CLI uses JSONL events
   if (found.format === 'copilot') {
@@ -3975,6 +4083,7 @@ function exportSessionMarkdown(sessionId, project) {
       found.format === 'cursor' ? loadCursorDetail(sessionId) :
       found.format === 'opencode' ? loadOpenCodeDetail(sessionId) :
       found.format === 'kiro' ? loadKiroDetail(sessionId) :
+      found.format === 'kiro-cli' ? loadKiroCliDetail(sessionId) :
       found.format === 'kilo' ? loadKiloCliDetail(sessionId) :
       found.format === 'qwen' ? loadQwenDetail(sessionId, found.file) :
       found.format === 'pi' ? loadPiDetail(sessionId, found.file) :
@@ -4116,6 +4225,22 @@ function _buildSessionFileIndex() {
             }
           }
         } catch {}
+      }
+    } catch {}
+  }
+
+  // Index Kiro CLI file-based sessions (~/.kiro/sessions/cli/, since ~May 2026)
+  if (fs.existsSync(KIRO_SESSIONS_DIR)) {
+    try {
+      for (const entry of fs.readdirSync(KIRO_SESSIONS_DIR, { withFileTypes: true })) {
+        if (entry.isSymbolicLink() || !entry.isFile()) continue;
+        const f = entry.name;
+        if (!f.endsWith('.jsonl')) continue;
+        const sid = f.slice(0, -6);
+        if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sid)) continue;
+        if (!_sessionFileIndex[sid]) {
+          _sessionFileIndex[sid] = { file: path.join(KIRO_SESSIONS_DIR, f), format: 'kiro-cli', sessionId: sid };
+        }
       }
     } catch {}
   }
@@ -4624,6 +4749,12 @@ function getSessionPreview(sessionId, project, limit) {
       return { role: m.role, content: m.content.slice(0, 300) };
     });
   }
+  if (found.format === 'kiro-cli') {
+    var detail = loadKiroCliDetail(sessionId);
+    return detail.messages.slice(0, limit).map(function(m) {
+      return { role: m.role, content: m.content.slice(0, 300) };
+    });
+  }
 
   // OpenCode: use loadOpenCodeDetail and slice
   if (found.format === 'opencode') {
@@ -4751,6 +4882,13 @@ function buildSearchIndex(sessions) {
         }
       } else if (found.format === 'kiro') {
         const detail = loadKiroDetail(s.id);
+        for (const msg of detail.messages) {
+          if (msg.content && !isSystemMessage(msg.content)) {
+            texts.push({ role: msg.role, content: msg.content.slice(0, 500) });
+          }
+        }
+      } else if (found.format === 'kiro-cli') {
+        const detail = loadKiroCliDetail(s.id);
         for (const msg of detail.messages) {
           if (msg.content && !isSystemMessage(msg.content)) {
             texts.push({ role: msg.role, content: msg.content.slice(0, 500) });
@@ -4902,6 +5040,18 @@ function getSessionReplay(sessionId, project) {
     }
   } else if (found.format === 'kiro') {
     const detail = loadKiroDetail(sessionId);
+    for (const msg of detail.messages) {
+      if (msg.content && !isSystemMessage(msg.content)) {
+        messages.push({
+          role: msg.role,
+          content: msg.content.slice(0, 3000),
+          timestamp: 0,
+          ms: 0,
+        });
+      }
+    }
+  } else if (found.format === 'kiro-cli') {
+    const detail = loadKiroCliDetail(sessionId);
     for (const msg of detail.messages) {
       if (msg.content && !isSystemMessage(msg.content)) {
         messages.push({
@@ -6056,23 +6206,40 @@ async function getActiveSessions() {
     if (entryScore > existingScore) deduped.set(key, entry);
   }
 
-  // Scope to agents launched from codbash — only those whose process tree
-  // descends from a codbash terminal pane (see pty-registry). Matches the
-  // "codbash-only" RUNNING AGENTS model: no panes open → nothing shown.
-  return await _scopeToCodbashAgents(Array.from(deduped.values()));
+  // Tag each live agent with `local`: true when its process tree descends from
+  // a codbash browser-pty pane, false when it runs in an EXTERNAL native
+  // terminal (iTerm/Terminal.app/Warp/cmux…). Nothing is dropped — the Workspace
+  // "Running agents" tree shows the external ones (they have no other UI home),
+  // while codbash panes are already visible as tabs. See
+  // docs/design/running-agents-external.md.
+  return await _tagCodbashAgents(Array.from(deduped.values()));
 }
 
-// Keep only active entries whose process ancestry reaches a live codbash pty.
-// Empty pty registry → empty result (nothing is running *in* codbash). If the
-// ppid scan itself fails we fail OPEN (return the unfiltered list) rather than
-// hiding genuine sessions on a transient `ps` error.
-async function _scopeToCodbashAgents(active) {
+// Pure ancestry tagging: return a new array where each agent carries
+// `local=true` iff walking its pid→ppid chain reaches a live codbash-pty pid
+// in `live` (Set<number>); otherwise `local=false` (external terminal). Never
+// mutates inputs; the walk is depth-bounded so a ppid cycle can't hang.
+function _tagLocalAgents(active, live, ppidOf) {
+  return active.map(a => {
+    let pid = a.pid, depth = 0, local = false;
+    while (pid && depth < 16) {
+      if (live.has(pid)) { local = true; break; }
+      pid = ppidOf.get(pid);
+      depth++;
+    }
+    return { ...a, local };
+  });
+}
+
+// Async wrapper: builds the live-pty set + pid→ppid map (one off-loop `ps`),
+// then tags. Fails OPEN by marking every agent external (local=false) so a
+// transient `ps` error surfaces agents rather than hiding them.
+async function _tagCodbashAgents(active) {
+  const asExternal = () => active.map(a => ({ ...a, local: false }));
   let ptyRegistry;
-  try { ptyRegistry = require('./pty-registry'); } catch { return active; }
-  const livePids = ptyRegistry.all();
-  if (!livePids.length) return [];
-  if (process.platform === 'win32') return active; // no ppid scan here
-  const live = new Set(livePids);
+  try { ptyRegistry = require('./pty-registry'); } catch { return asExternal(); }
+  if (process.platform === 'win32') return asExternal(); // no ppid scan here
+  const live = new Set(ptyRegistry.all());
 
   // Build a pid→ppid map in one cheap (async, off-loop) call so we can walk each
   // agent's ancestry without blocking the event loop.
@@ -6083,17 +6250,9 @@ async function _scopeToCodbashAgents(active) {
       const m = line.trim().match(/^(\d+)\s+(\d+)$/);
       if (m) ppidOf.set(parseInt(m[1], 10), parseInt(m[2], 10));
     }
-  } catch { return active; } // fail open
+  } catch { return asExternal(); } // fail open
 
-  return active.filter(a => {
-    let pid = a.pid, depth = 0;
-    while (pid && depth < 16) {
-      if (live.has(pid)) return true;
-      pid = ppidOf.get(pid);
-      depth++;
-    }
-    return false;
-  });
+  return _tagLocalAgents(active, live, ppidOf);
 }
 
 // ── Leaderboard stats ─────────────────────────────────────
@@ -6476,6 +6635,7 @@ module.exports = {
   HISTORY_FILE,
   PROJECTS_DIR,
   __test: {
+    _tagLocalAgents,
     parseWslDistroList,
     getWslDistroList,
     getRunningWslDistroSet,
@@ -6514,5 +6674,7 @@ module.exports = {
     findPiSessionByResumeTarget,
     _sessionsNeedRescan,
     _updateScanMarkers,
+    scanKiroCliSessions,
+    loadKiroCliDetail,
   },
 };

@@ -12,6 +12,7 @@ const { convertSession } = require('./convert');
 const { generateHandoff } = require('./handoff');
 const { CHANGELOG } = require('./changelog');
 const { getHTML } = require('./html');
+const { isDisallowedCrossOrigin } = require('./origin-guard');
 const projectsApi = require('./projects');
 const settingsApi = require('./settings');
 const terminal = require('./terminal');
@@ -117,6 +118,11 @@ function getValidatedPiResumeTarget(sessionId, resumeTarget, project) {
 const LOG_VERBOSE = process.env.CODEDASH_LOG !== '0';
 const DEFAULT_HOST = '127.0.0.1';
 
+// Project ids with an in-flight re-clone. Guards against a double-click / script
+// piling up concurrent `git clone` subprocesses for the same project (each up to
+// 120s). Zero-dependency, single-process — a plain Set is sufficient.
+const _inFlightReclone = new Set();
+
 function log(tag, msg, data) {
   if (!LOG_VERBOSE && tag !== 'ERROR') return;
   const ts = new Date().toLocaleTimeString('en-GB');
@@ -150,6 +156,14 @@ function startServer(host, port, openBrowser = true) {
         res.end('Forbidden: host header must be localhost');
         return;
       }
+    }
+    // CSRF gate: block cross-origin state-changing requests before any route
+    // runs (covers every current and future POST/PUT/DELETE uniformly). Static
+    // GETs and the same-origin frontend are unaffected. See isDisallowedCrossOrigin.
+    if (isDisallowedCrossOrigin(req.method, req.headers)) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Forbidden: cross-origin request');
+      return;
     }
     // req.url is usually relative, so this base is only for URL parsing.
     // Keep it stable instead of reusing the bind host, which may be a wildcard listen address.
@@ -378,6 +392,19 @@ function startServer(host, port, openBrowser = true) {
             if (fresh && !project) {
               throw new Error('project path required for fresh session');
             }
+            // Distinguish "folder was deleted" from "unsafe path" BEFORE the
+            // generic safety check, so a user who removed a registered repo gets
+            // an actionable "missing" response (with the GitHub remote to
+            // re-clone from) instead of a confusing "invalid or unsafe path".
+            if (project && !projectsApi.pathExists(project)) {
+              const absMissing = projectsApi.normalizePath(project);
+              const reg = projectsApi.loadProjects().find(p => p.path === absMissing);
+              throw Object.assign(new Error('project folder is missing on disk'), {
+                missing: true,
+                remoteUrl: reg && reg.remoteUrl ? reg.remoteUrl : '',
+                projectId: reg ? reg.id : '',
+              });
+            }
             // The project path flows into a shell command string in terminals.js
             // (`cd "..." && claude ...`). Even though JSON.stringify wraps the
             // value in double quotes, bash still expands $() and backticks
@@ -429,7 +456,12 @@ function startServer(host, port, openBrowser = true) {
             json(res, registered ? { ok: true, registered } : { ok: true });
           } catch (e) {
             log('ERROR', `launch failed: ${e.message}`);
-            json(res, { ok: false, error: e.message }, 400);
+            // Pass through the "missing folder" hint so the client can offer a
+            // one-click re-clone instead of a dead-end error toast.
+            const extra = e && e.missing
+              ? { missing: true, remoteUrl: e.remoteUrl || '', projectId: e.projectId || '' }
+              : {};
+            json(res, { ok: false, error: e.message, ...extra }, 400);
           }
         })();
       });
@@ -873,9 +905,14 @@ function startServer(host, port, openBrowser = true) {
     // ── Manual / cloned projects registry ──────────────────────
     else if (req.method === 'GET' && pathname === '/api/projects/manual') {
       // Enrich each with current git info so the UI can render branch/last commit.
+      // `exists` reflects whether the folder is still on disk — a deleted repo
+      // keeps its registry entry, so the launcher needs this to flip the tile
+      // into its "folder missing — re-clone" state. Skip the git probe when the
+      // folder is gone (it would only shell out to fail).
       const list = projectsApi.loadProjects().map(p => {
-        const info = getProjectGitInfo(p.path) || null;
-        return { ...p, git: info };
+        const exists = projectsApi.pathExists(p.path);
+        const info = exists ? (getProjectGitInfo(p.path) || null) : null;
+        return { ...p, exists, git: info };
       });
       json(res, list);
     }
@@ -960,6 +997,45 @@ function startServer(host, port, openBrowser = true) {
       });
     }
 
+    // POST /api/projects/reclone — { id } → re-clone a registered project whose
+    // folder was deleted, restoring it at its ORIGINAL path (not a fresh
+    // ~/code/<repo>). Uses the remoteUrl already recorded in the registry.
+    else if (req.method === 'POST' && pathname === '/api/projects/reclone') {
+      readBody(req, body => {
+        let payload;
+        try { payload = JSON.parse(body || '{}'); }
+        catch { return json(res, { ok: false, error: 'invalid json' }, 400); }
+        const id = String(payload.id || '');
+        if (!/^[a-f0-9]{16}$/.test(id)) {
+          return json(res, { ok: false, error: 'invalid id' }, 400);
+        }
+        const proj = projectsApi.loadProjects().find(p => p.id === id);
+        if (!proj) return json(res, { ok: false, error: 'project not found in registry' }, 404);
+        if (!proj.remoteUrl) {
+          return json(res, { ok: false, error: 'no GitHub remote recorded for this project — cannot re-clone' }, 400);
+        }
+        if (_inFlightReclone.has(id)) {
+          return json(res, { ok: false, error: 'a re-clone for this project is already in progress' }, 409);
+        }
+        _inFlightReclone.add(id);
+        log('CLONE', `reclone ${proj.name} → ${proj.path}`);
+        // cloneRepo enforces GitHub-only remotes + destination-under-$HOME
+        // (incl. the symlinked-ancestor check), and treats an already-present
+        // same-remote clone as success — so a racing restore or a
+        // partially-deleted folder resolves cleanly.
+        projectsApi.cloneRepo(proj.remoteUrl, proj.path)
+          .then(result => {
+            log('CLONE', `reclone done ${proj.name} (${result.alreadyExisted ? 'existed' : 'cloned'})`);
+            json(res, { ok: true, project: proj, alreadyExisted: result.alreadyExisted });
+          })
+          .catch(e => {
+            log('ERROR', `reclone failed: ${e.message}`);
+            json(res, { ok: false, error: e.message }, 400);
+          })
+          .finally(() => { _inFlightReclone.delete(id); });
+      });
+    }
+
     // ── Cloud Sync Proxy ─────────────────────
     else if (pathname.startsWith('/api/cloud/')) {
       handleCloudProxy(req, res, pathname).catch(e => json(res, { error: e.message }, 500));
@@ -988,6 +1064,15 @@ function startServer(host, port, openBrowser = true) {
 
     // ── Self-update ─────────────────────────
     else if (req.method === 'POST' && pathname === '/api/update') {
+      // In the desktop app (Electron shell), this npm-based self-update is wrong:
+      // it would `npm i -g` an unrelated global copy while the app keeps running
+      // its bundled server, so the restart lands back on the old version. The
+      // desktop uses electron-updater instead — refuse here so nothing silently
+      // half-updates. CODBASH_DESKTOP=1 is set by desktop/main.js when it spawns us.
+      if (process.env.CODBASH_DESKTOP === '1') {
+        json(res, { ok: false, error: 'Use the built-in updater in the desktop app.' }, 400);
+        return;
+      }
       const pkg = require('../package.json');
       log('UPDATE', `Starting self-update from v${pkg.version}...`);
       json(res, { ok: true, message: 'Updating... Page will reload.' });
@@ -1061,6 +1146,7 @@ function startServer(host, port, openBrowser = true) {
     console.log(`  \x1b[2m${browserUrl}\x1b[0m`);
     if (host === '0.0.0.0' || host === '::' || host === '[::]') {
       console.log('  \x1b[2mListening on all interfaces\x1b[0m');
+      console.log('  \x1b[33mNote: Running Agents / /api/active lists every agent process on this host (all users) — reachable from your LAN in this mode.\x1b[0m');
     }
     console.log('  \x1b[2mPress Ctrl+C to stop\x1b[0m');
     console.log('');

@@ -2075,6 +2075,14 @@ function scrollToInstallAgents() {
   if (section && section.scrollIntoView) section.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
+// Anchored GitHub-remote check, matching the server's cloneRepo regex
+// (src/projects.js). Used to decide whether to offer "Re-clone" — an unanchored
+// substring test would show the button for a spoofed URL like
+// https://evil.com/github.com/... that the server would then reject.
+function isGithubRemote(url) {
+  return typeof url === 'string' && /^(https:\/\/github\.com\/|git@github\.com:)/.test(url);
+}
+
 // Live Workspace panes whose resolved cwd is this project folder.
 function _projectLiveTerminals(projPath) {
   if (!projPath || typeof _wsAllPanes !== 'function') return [];
@@ -2100,9 +2108,15 @@ function renderLauncherCard(projKey, projInfo) {
 
   var preferredTool = pickPreferredTool(projPath, lastSession);
   var installed = window.installedAgents || [];
-  var canLaunch = installed.length > 0 && !!projPath;
+  // A registered folder can be deleted from disk at any time; `_exists === false`
+  // comes from the server's on-disk check. When missing, we suppress the launch
+  // controls (they'd fail) and surface a re-clone/remove path instead.
+  var exists = projInfo._exists !== false;
+  var remoteUrl = projInfo._remoteUrl || '';
+  var canReclone = !exists && isGithubRemote(remoteUrl);
+  var canLaunch = installed.length > 0 && !!projPath && exists;
 
-  var html = '<div class="launcher-card">';
+  var html = '<div class="launcher-card' + (exists ? '' : ' launcher-card-missing') + '">';
   html += '<div class="launcher-card-header">';
   html += '<span class="launcher-card-dot" style="background:' + color + '"></span>';
   html += '<span class="launcher-card-name" title="' + escHtml(projName) + '">' + escHtml(projName) + '</span>';
@@ -2111,10 +2125,46 @@ function renderLauncherCard(projKey, projInfo) {
   if (projPath) html += '<div class="launcher-card-path" title="' + escHtml(projPath) + '">' + escHtml(projPath) + '</div>';
   html += '<div class="launcher-card-meta">';
   html += '<span>' + (totalSessions === 0 ? 'no sessions yet' : (totalSessions + ' session' + (totalSessions === 1 ? '' : 's'))) + '</span>';
-  if (preferredTool) html += '<span>· next: ' + escHtml(agentLabel(preferredTool)) + '</span>';
+  if (exists && preferredTool) html += '<span>· next: ' + escHtml(agentLabel(preferredTool)) + '</span>';
   html += '</div>';
 
-  html += '<div class="launcher-card-actions">';
+  // Disclaimer for a deleted/moved folder — persistent descriptive content, so
+  // role="note" (not a live region: it's present on render, not a transient
+  // status update — the launch-fail case is announced via toast instead).
+  if (!exists) {
+    html += '<div class="launcher-card-warning" role="note">' +
+      '⚠ Folder is missing on disk — it was moved or deleted. ' +
+      (canReclone
+        ? 'Re-clone the latest version from GitHub.'
+        : 'Restore the folder, or remove it from the list.') +
+      '</div>';
+  }
+
+  if (!exists) {
+    // Missing folder: no launch controls. Offer Re-clone (when we have a GitHub
+    // remote) and Remove-from-registry. Only emit the actions row if at least
+    // one control will render, so an edge-case card isn't left with an empty box.
+    var missingActions = '';
+    if (canReclone) {
+      var recloneAria = 'Re-clone ' + projName + ' from GitHub';
+      missingActions += '<button class="git-project-launch-btn primary reclone-btn" ' +
+        'data-proj-id="' + escHtml(projInfo.manualId || '') + '" data-proj-name="' + escHtml(projName) + '" ' +
+        'onclick="recloneProject(this.dataset.projId, this.dataset.projName, this)" ' +
+        'title="' + escHtml('Re-download the latest version from GitHub into ' + projPath) + '" ' +
+        'aria-label="' + escHtml(recloneAria) + '">↓ Re-clone</button>';
+    }
+    if (projInfo.manualId) {
+      missingActions += '<button class="git-project-launch-btn" data-proj-id="' + escHtml(projInfo.manualId) + '" data-proj-name="' + escHtml(projName) + '" onclick="unregisterProject(this.dataset.projId,this.dataset.projName)" title="Remove from registry (does not delete files)" aria-label="Remove ' + escHtml(projName) + ' from the list">× Remove</button>';
+    }
+    if (missingActions) html += '<div class="launcher-card-actions">' + missingActions + '</div>';
+    // Keep History drill-in available even when the folder is gone (sessions
+    // live in the agent history dirs, not the repo).
+    if (totalSessions > 0) {
+      html += '<button class="launcher-card-link" data-proj-key="' + escHtml(projKey) + '" data-proj-name="' + escHtml(projName) + '" onclick="viewProjectInHistory(this.dataset.projKey,this.dataset.projName)">View ' + totalSessions + ' session' + (totalSessions === 1 ? '' : 's') + ' →</button>';
+    }
+    html += '</div>';
+    return html;
+  }
   if (canLaunch && preferredTool) {
     var newAria = 'Start new ' + agentLabel(preferredTool) + ' session in ' + projName;
     var pickerAria = 'Pick a different agent for ' + projName;
@@ -2190,8 +2240,11 @@ function mergeRegistryWithSessions(sessions) {
     byGit[info.key].list.push(s);
   });
   (window.manualProjects || []).forEach(function(p) {
+    // `exists` is undefined for older payloads / session-derived merges — treat
+    // absence as "present" so we never falsely flag a folder as missing.
+    var exists = p.exists !== false;
     if (!byGit[p.path]) {
-      byGit[p.path] = { name: p.name, list: [], path: p.path, source: p.source || 'manual', manualId: p.id, _git: p.git, _lastAdded: p.addedAt };
+      byGit[p.path] = { name: p.name, list: [], path: p.path, source: p.source || 'manual', manualId: p.id, _git: p.git, _lastAdded: p.addedAt, _exists: exists, _remoteUrl: p.remoteUrl || '' };
     } else {
       // When a registry entry overlaps a session-derived entry, the registry's
       // `source` (manual / github-clone / auto) is the authoritative one — only
@@ -2203,7 +2256,7 @@ function mergeRegistryWithSessions(sessions) {
       var resolvedSource = keepRegistrySource
         ? p.source
         : ((!existing.source || existing.source === 'session') ? 'manual' : existing.source);
-      byGit[p.path] = { ...existing, manualId: p.id, source: resolvedSource };
+      byGit[p.path] = { ...existing, manualId: p.id, source: resolvedSource, _exists: exists, _remoteUrl: p.remoteUrl || existing._remoteUrl || '' };
     }
   });
   return byGit;
@@ -2979,7 +3032,13 @@ document.addEventListener('keydown', function(e) {
     return;
   }
   if (e.key === 'Escape') {
-    if (pendingDelete) {
+    // Close the confirm overlay whenever it's on screen — it's shared by the
+    // delete dialog (sets pendingDelete) AND the "project folder is missing"
+    // re-clone dialog (does not), so keying off pendingDelete alone left the
+    // latter undismissable.
+    var confirmOverlay = document.getElementById('confirmOverlay');
+    var confirmOpen = confirmOverlay && confirmOverlay.style.display === 'flex';
+    if (pendingDelete || confirmOpen) {
       closeConfirm();
     } else {
       closeDetail();
@@ -3578,6 +3637,10 @@ function showExportDialog() {
 
 // ── Update check ──────────────────────────────────────────────
 
+function _isDesktopUpdater() {
+  return !!(window.codbashDesktop && window.codbashDesktop.isDesktop && window.codbashDesktop.updater);
+}
+
 async function checkForUpdates() {
   try {
     var resp = await fetch('/api/version');
@@ -3605,6 +3668,15 @@ async function checkForUpdates() {
     }
     localStorage.setItem('codedash-last-version', data.current);
 
+    // Desktop app: updates are driven by electron-updater (real in-place update),
+    // NOT the npm-based `/api/update` route (which would update an unrelated
+    // npm-global copy while the bundled server keeps running the old version).
+    // The banner is state-driven via IPC — ignore the npm `updateAvailable` here.
+    if (_isDesktopUpdater()) {
+      wireDesktopUpdater();
+      return;
+    }
+
     if (data.updateAvailable) {
       if (badge) {
         badge.textContent = 'v' + data.current + ' → v' + data.latest;
@@ -3629,7 +3701,115 @@ async function checkForUpdates() {
   } catch {}
 }
 
+// ── Desktop in-app updater (electron-updater via IPC) ─────────────────────────
+// State-driven banner: 'available' → Download → 'downloading' (%) → 'downloaded'
+// → Restart. Mirrors what main.js emits over 'codbash:update-state'.
+var _desktopUpdaterWired = false;
+function wireDesktopUpdater() {
+  if (_desktopUpdaterWired || !_isDesktopUpdater()) return;
+  _desktopUpdaterWired = true;
+  // The npm command doesn't apply in the desktop app — hide the Copy button.
+  var copyBtn = document.getElementById('updateCopyBtn');
+  if (copyBtn) copyBtn.style.display = 'none';
+  window.codbashDesktop.updater.onState(function (s) { renderDesktopUpdateState(s || {}); });
+  // Kick off a check now; periodic re-checks run in main.js.
+  try { window.codbashDesktop.updater.check(); } catch (e) {}
+}
+
+function _setUpdatePrimary(label, handler, disabled) {
+  var btn = document.getElementById('updatePrimaryBtn');
+  if (!btn) return;
+  btn.textContent = label;
+  btn.onclick = disabled ? null : handler;
+  btn.disabled = !!disabled;
+  btn.style.opacity = disabled ? '0.6' : '1';
+}
+
+// The banner's second button (the npm "Copy Command" button in browser mode) is
+// repurposed as an optional secondary action in the desktop updater (e.g. the
+// manual "Open download page" fallback next to "Check again" on error).
+function _setUpdateSecondary(label, handler) {
+  var btn = document.getElementById('updateCopyBtn');
+  if (!btn) return;
+  if (!label) { btn.style.display = 'none'; btn.onclick = null; return; }
+  btn.textContent = label;
+  btn.onclick = handler;
+  btn.style.display = '';
+  btn.style.opacity = '0.7';
+}
+
+// True once we've surfaced an actual update to the user (available/downloading/
+// downloaded). Gates the error banner so a transient hiccup on the routine 6h
+// background check doesn't pop an alarming "auto-update unavailable" out of
+// nowhere — the error is only worth showing if the user was mid-flow.
+var _desktopUpdateSurfaced = false;
+function renderDesktopUpdateState(s) {
+  var banner = document.getElementById('updateBanner');
+  var text = document.getElementById('updateText');
+  var badge = document.getElementById('versionBadge');
+  if (!banner || !text) return;
+  var U = window.codbashDesktop.updater;
+  switch (s.state) {
+    case 'available':
+      _desktopUpdateSurfaced = true;
+      _setUpdateSecondary(null);
+      text.textContent = 'v' + (s.version || '') + ' available';
+      // Optimistically disable on click (before the IPC round-trip) so a fast
+      // double-click can't fire two downloads; main.js also guards server-side.
+      _setUpdatePrimary('Download', function () { _setUpdatePrimary('Downloading…', null, true); U.download(); }, false);
+      banner.style.display = 'flex';
+      if (badge) {
+        badge.classList.add('update-available');
+        badge.title = 'Download update';
+        badge.onclick = function () { U.download(); };
+      }
+      break;
+    case 'downloading':
+      _desktopUpdateSurfaced = true;
+      _setUpdateSecondary(null);
+      text.textContent = 'Downloading update… ' + (s.percent != null ? s.percent + '%' : '');
+      _setUpdatePrimary('Downloading…', null, true);
+      banner.style.display = 'flex';
+      break;
+    case 'downloaded':
+      _desktopUpdateSurfaced = true;
+      _setUpdateSecondary(null);
+      text.textContent = 'v' + (s.version || '') + ' ready — restart to apply';
+      _setUpdatePrimary('Restart to update', function () { U.install(); }, false);
+      banner.style.display = 'flex';
+      if (badge) { badge.title = 'Restart to update'; badge.onclick = function () { U.install(); }; }
+      break;
+    case 'error':
+      // In-place update couldn't apply. Only surface it if the user was already
+      // mid-flow (they clicked Download and it failed) — degrade gracefully with
+      // a retry plus a manual fallback. A background-check error with nothing
+      // offered stays silent.
+      if (!_desktopUpdateSurfaced) break;
+      text.textContent = 'Update failed — retry or open the download page';
+      _setUpdatePrimary('Check again', function () { U.check(); }, false);
+      _setUpdateSecondary('Open download page', function () { U.openReleases(); });
+      banner.style.display = 'flex';
+      break;
+    case 'none':
+      // Re-check found nothing new: clear any stale banner we had shown.
+      _desktopUpdateSurfaced = false;
+      _setUpdateSecondary(null);
+      banner.style.display = 'none';
+      break;
+    case 'checking':
+    default:
+      // Transient — leave the banner as it is.
+      break;
+  }
+}
+
 async function selfUpdate() {
+  // Desktop app: route to the in-place updater (download → restart), never the
+  // npm-based route which can't touch the running bundled server.
+  if (_isDesktopUpdater()) {
+    try { window.codbashDesktop.updater.download(); } catch (e) {}
+    return;
+  }
   if (!confirm('Update codbash to latest version? The page will reload.')) return;
   showToast('Updating...');
   try {
@@ -3713,6 +3893,8 @@ async function launchNewProjectSession(projectPath, tool, btn) {
         window.codbashSettings.lastUsedByPath = window.codbashSettings.lastUsedByPath || {};
         window.codbashSettings.lastUsedByPath[projectPath] = t;
       }
+    } else if (data.missing) {
+      handleMissingProjectLaunch(data, projectPath.split('/').pop());
     } else {
       showToast('Launch failed: ' + (data.error || 'unknown'));
     }
@@ -4028,6 +4210,7 @@ async function resumeLastProjectSession(sessionId, tool, projectPath, btn) {
     });
     var data = await resp.json();
     if (data.ok) showToast('Resuming ' + sessionId.slice(0, 8) + '…');
+    else if (data.missing) handleMissingProjectLaunch(data, (projectPath || '').split('/').pop());
     else showToast('Resume failed: ' + (data.error || 'unknown'));
   } catch (e) {
     showToast('Resume failed: ' + e.message);
@@ -4456,6 +4639,71 @@ async function cloneRepoAndAdd(btn) {
     btn.textContent = 'Retry';
     showToast('Clone failed: ' + e.message);
   }
+}
+
+// Re-clone a registered project whose folder was deleted, restoring it at its
+// original path. Driven by the "Re-clone" button on a missing launcher card and
+// by the re-clone confirm offered after a launch hits a missing folder.
+async function recloneProject(id, name, btn) {
+  if (!id) { showToast('Missing project id'); return; }
+  var safeName = name || 'project';
+  if (btn) {
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.innerHTML = '↓ Cloning…';
+  } else {
+    // Driven from the confirm dialog (no button to relabel) — give immediate
+    // feedback so the multi-second clone isn't silent.
+    showToast('Cloning ' + safeName + ' from GitHub…');
+  }
+  try {
+    var resp = await fetch('/api/projects/reclone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: id }),
+    });
+    var data = await resp.json();
+    if (data.ok) {
+      showToast(data.alreadyExisted ? 'Folder already present for ' + safeName : 'Re-cloned ' + safeName + ' from GitHub');
+      await loadManualProjects();
+    } else {
+      if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.innerHTML = '↓ Retry'; }
+      showToast('Re-clone failed: ' + (data.error || 'unknown'));
+    }
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.removeAttribute('aria-busy'); btn.innerHTML = '↓ Retry'; }
+    showToast('Re-clone failed: ' + (e && e.message));
+  }
+}
+
+// Shared handler for a launch that failed because the project folder is gone.
+// Refreshes the registry (so the tile flips to its missing state) and, when we
+// know a GitHub remote, offers a one-click re-clone via the confirm overlay.
+function handleMissingProjectLaunch(data, name) {
+  var safeName = String(name || 'This project').replace(/[\r\n\t\x00-\x1f]/g, ' ').slice(0, 200);
+  loadManualProjects();
+  var overlay = document.getElementById('confirmOverlay');
+  var canReclone = data && data.projectId && isGithubRemote(data.remoteUrl);
+  if (!canReclone || !overlay) {
+    // No re-clone possible (or no overlay in the DOM) — a plain toast with the
+    // recovery hint is the fallback.
+    showToast('"' + safeName + '" folder is missing on disk — restore it or remove it from Projects');
+    return;
+  }
+  document.getElementById('confirmTitle').textContent = 'Project folder is missing';
+  document.getElementById('confirmText').textContent =
+    '"' + safeName + '" was moved or deleted from disk. Re-clone the latest version from GitHub?';
+  document.getElementById('confirmId').textContent = '';
+  var btn = document.getElementById('confirmAction');
+  btn.textContent = 'Re-clone';
+  btn.className = 'launch-btn btn-primary';
+  btn.onclick = function() {
+    overlay.style.display = 'none';
+    recloneProject(data.projectId, safeName, null);
+  };
+  overlay.style.display = 'flex';
+  // Move focus into the dialog so keyboard/SR users land on the primary action.
+  setTimeout(function() { if (btn && btn.focus) btn.focus(); }, 0);
 }
 
 // ── Initialization ─────────────────────────────────────────────
