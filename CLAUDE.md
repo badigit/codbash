@@ -1,5 +1,50 @@
 # Codbash
 
+<!-- FORK-LOCAL: badigit/codbash, рабочая ветка dim, база upstream/main.
+     Блок ниже — наш, апстриму не принадлежит. При rebase сохранять. -->
+
+## ⚠️ Это форк. Локальные правила (badigit/codbash)
+
+- **Ветки:** `main` — чистое зеркало `upstream/main` (только fast-forward, своих
+  коммитов нет). `dim` — рабочая, default на origin. Апстрим вливаем **только
+  rebase, никогда merge** — `git diff upstream/main...dim` обязан оставаться
+  точным списком наших отличий.
+- **Установка на этой машине:** не npm-пакет, а `npm link` — junction
+  `%APPDATA%\fnm\aliases\default\node_modules\codbash-app` → этот репозиторий.
+  Правки видны после перезагрузки страницы, переустановка не нужна.
+  ⚠️ `npm i -g codbash-app` ставить нельзя: перезатрёт junction апстримной копией.
+
+## Long-running services: PM2 stack `codbash`
+
+Сервис крутится под **PM2** (стак `codbash`, конфиг `ecosystem.config.cjs` в
+корне), управляется из дашборда ai-tools. Общее правило флота —
+`~/.claude/rules/pm2-fleet.md`; здесь — контракт этого стака.
+
+**Прежде чем запускать/останавливать/убивать — глянь живое состояние:**
+`pm2 jlist` (или `pm2 ls`).
+
+Процессы стака:
+
+- `codbash` — веб-дашборд сессий, `http://localhost:3847`
+
+Управление:
+
+- Перезапуск (деплой правки): `pm2 restart codbash`.
+- Остановить / поднять: `pm2 stop codbash` / `pm2 start ecosystem.config.cjs`.
+- Логи: `pm2 logs codbash --lines 100 --nostream`.
+
+Запрещено:
+
+- **НЕ поднимать второй экземпляр поверх живой PM2-копии** (`codbash run`,
+  `node bin/cli.js run`, ярлык в фоне) — гонка за порт 3847, одна из копий
+  молча умрёт. Сначала `pm2 stop codbash`, потом свой запуск; в конце верни как было.
+- **НЕ убивать через `taskkill`/`Stop-Process`** — только `pm2 stop codbash`.
+  Точечный kill оставляет PM2 в рассинхроне.
+
+⚠️ **`--host=localhost` выбран осознанно.** Дашборд отдаёт транскрипты всех
+агентских сессий без авторизации. Открывать наружу (`--host=0.0.0.0`) — только
+сознательно и с firewall-правилом.
+
 ## What is this
 
 Codbash (`codbash-app` on npm) is a zero-dependency Node.js browser dashboard for managing AI coding agent sessions. Supports 7 agents: Claude Code, Codex, Cursor, OpenCode, Kiro CLI, Kilo CLI, Copilot Chat. Single `npm i -g codbash-app && codbash run` opens a local web UI.
