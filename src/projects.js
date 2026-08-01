@@ -54,11 +54,28 @@ function withWriteLock(fn) {
   return next;
 }
 
+// Windows only: translate a POSIX-style drive path into a native one.
+//   /c/Users/foo      → C:\Users\foo   (Git Bash / MSYS — the most common way a
+//                                       Windows user copies a path)
+//   /mnt/c/Users/foo  → C:\Users\foo   (WSL)
+// Without this, path.resolve() treats the leading segment as a folder name and
+// produces C:\c\Users\foo, which fails validation with a confusing
+// "path does not exist". Mirrors toWindowsPath() in terminals.js, which already
+// does the WSL half for session cwds.
+// Gated on win32 because /c/... and /mnt/c/... are legitimate paths elsewhere.
+function fromPosixDrivePath(p) {
+  if (process.platform !== 'win32' || !p) return p;
+  const m = p.match(/^\/(?:mnt\/)?([a-zA-Z])(?:\/(.*))?$/);
+  if (!m) return p;
+  return m[1].toUpperCase() + ':\\' + (m[2] || '').replace(/\//g, '\\');
+}
+
 function normalizePath(p) {
   if (!p) return '';
   // Expand ~ and strip trailing slash
   let out = p;
   if (out.startsWith('~')) out = path.join(os.homedir(), out.slice(1));
+  out = fromPosixDrivePath(out);
   out = path.resolve(out);
   return out;
 }
