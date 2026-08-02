@@ -372,7 +372,31 @@ function startServer(host, port, openBrowser = true) {
     else if (req.method === 'GET' && pathname.startsWith('/api/session/') && !pathname.includes('/export')) {
       const sessionId = pathname.split('/').pop();
       const project = parsed.searchParams.get('project') || '';
-      const data = loadSessionDetail(sessionId, project);
+      // FORK-LOCAL: ?full=1 — не резать сообщения по 2000 символов (длинные
+      // ответы иначе обрываются на середине). ?limit=N&offset=K — отдать окно
+      // сообщений: без offset это хвост переписки, с offset — страница выше.
+      // Так чат открывается снизу и не тащит на фронт всю сессию целиком.
+      const full = parsed.searchParams.get('full') === '1';
+      const limit = parseInt(parsed.searchParams.get('limit') || '0', 10);
+      const offsetRaw = parsed.searchParams.get('offset');
+      if (full) dataApi.setDetailMaxChars(Number.MAX_SAFE_INTEGER);
+      let data;
+      try {
+        data = loadSessionDetail(sessionId, project);
+      } finally {
+        if (full) dataApi.setDetailMaxChars(2000);
+      }
+      if (limit > 0 && Array.isArray(data.messages)) {
+        const total = data.messages.length;
+        const offset = offsetRaw === null
+          ? Math.max(0, total - limit)
+          : Math.max(0, Math.min(parseInt(offsetRaw, 10) || 0, total));
+        data = Object.assign({}, data, {
+          messages: data.messages.slice(offset, offset + limit),
+          total,
+          offset,
+        });
+      }
       json(res, data);
     }
 

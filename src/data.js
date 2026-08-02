@@ -616,7 +616,7 @@ function loadQwenDetail(sessionId, filePath, options) {
 
       const msg = {
         role: entry.type,
-        content: content.slice(0, 2000),
+        content: content.slice(0, DETAIL_MAX_CHARS),
         uuid: entry.uuid || '',
         timestamp: entry.timestamp || '',
         model: entry.type === 'assistant' ? (entry.model || '') : '',
@@ -864,7 +864,7 @@ function loadPiDetail(sessionId, filePath, options) {
 
       const msg = {
         role,
-        content: content.slice(0, 2000),
+        content: content.slice(0, DETAIL_MAX_CHARS),
         uuid: entry.uuid || raw.id || '',
         timestamp: entry.timestamp || raw.timestamp || '',
         model: role === 'assistant' ? (raw.model || entry.model || '') : '',
@@ -1326,7 +1326,7 @@ function loadOpenCodeDetail(sessionId) {
 
       const msg = {
         role: role,
-        content: content.slice(0, 2000),
+        content: content.slice(0, DETAIL_MAX_CHARS),
         uuid: '',
         model: msgData.modelID || msgData.model?.modelID || '',
         tokens: tokens,
@@ -1494,7 +1494,7 @@ function loadKiloCliDetail(sessionId) {
 
       const msg = {
         role: role,
-        content: content.slice(0, 2000),
+        content: content.slice(0, DETAIL_MAX_CHARS),
         uuid: '',
         model: msgData.modelID || msgData.model?.modelID || '',
         tokens: tokens,
@@ -3817,6 +3817,16 @@ function loadSessions() {
   return result;
 }
 
+// FORK-LOCAL: апстрим режет каждое сообщение до 2000 символов — этого хватает
+// на превью в списке, но не на чтение переписки (длинные ответы обрываются на
+// середине). Лимит вынесен в переменную, чтобы /api/session/<id>?full=1 мог
+// отдать текст целиком. Node однопоточный, а loadSessionDetail синхронная,
+// поэтому временное поднятие лимита вокруг вызова безопасно.
+let DETAIL_MAX_CHARS = 2000;
+function setDetailMaxChars(n) {
+  DETAIL_MAX_CHARS = (typeof n === 'number' && n > 0) ? n : 2000;
+}
+
 function loadSessionDetail(sessionId, project) {
   const found = findSessionFile(sessionId, project);
   if (!found) return { error: 'Session file not found', messages: [] };
@@ -3876,7 +3886,7 @@ function loadSessionDetail(sessionId, project) {
           const rawContent = (entry.message || {}).content;
           const content = extractContent(rawContent);
           if (content) {
-            const msg = { role: entry.type, content: content.slice(0, 2000), uuid: entry.uuid || '' };
+            const msg = { role: entry.type, content: content.slice(0, DETAIL_MAX_CHARS), uuid: entry.uuid || '' };
             if (entry.type === 'user') {
               if (isFilteredClaudeStructuredMessage(content)) continue;
               const structured = parseStructuredMessage('claude', entry.type, content, entry);
@@ -3898,7 +3908,7 @@ function loadSessionDetail(sessionId, project) {
             if (structured) {
               messages.push({
                 role: 'queue',
-                content: content.slice(0, 2000),
+                content: content.slice(0, DETAIL_MAX_CHARS),
                 uuid: entry.uuid || '',
                 structured: structured,
               });
@@ -3913,7 +3923,7 @@ function loadSessionDetail(sessionId, project) {
           if (role === 'user' || role === 'assistant') {
             const content = extractContent(entry.payload.content);
             if (content && !isSystemMessage(content)) {
-              const msg = { role: role, content: content.slice(0, 2000), uuid: '' };
+              const msg = { role: role, content: content.slice(0, DETAIL_MAX_CHARS), uuid: '' };
               const structured = parseStructuredMessage('codex', role, content, entry);
               if (structured) msg.structured = structured;
               messages.push(msg);
@@ -6602,6 +6612,7 @@ function getLeaderboardStats() {
 module.exports = {
   loadSessions,
   loadSessionDetail,
+  setDetailMaxChars, // FORK-LOCAL
   getProjectGitInfo,
   getLeaderboardStats,
   getOrCreateAnonId,

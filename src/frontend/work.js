@@ -13,6 +13,7 @@
   var OPEN_PROJECTS = 3;    // сколько верхних проектов развёрнуто на старте
   var PAGE = 12;            // сессий в проекте до кнопки «ещё»
   var LIVE_POLL_MS = 15000; // как часто обновляем состояние живых сессий
+  var CHAT_PAGE = 40;       // сообщений в одной странице чата
   var PERIODS = [
     { key: 7, label: '7 дней' },
     { key: 30, label: '30 дней' },
@@ -29,6 +30,7 @@
     selectedId: null,
     filter: '',
     period: 7,           // дней; 0 — без ограничения
+    chat: null,          // { id, offset, total, loading } — окно открытого чата
     loaded: false,
     pollTimer: null,
   };
@@ -79,9 +81,10 @@
 
   function fullTime(ts) { return ts ? new Date(toMs(ts)).toLocaleString() : ''; }
 
-  // Минимальный markdown: fenced-блоки и `inline`. Апстрим отдаёт содержимое
-  // экранированным в <pre>, поэтому разметка в чате не работает. Без библиотек —
-  // у проекта zero-dependency ядро.
+  // Markdown своими руками: апстрим отдаёт содержимое экранированным в <pre>,
+  // поэтому в чате не работает ничего — ни ```, ни заголовки, ни **жирный**.
+  // Библиотеку не тянем: у проекта zero-dependency ядро. Порядок важен —
+  // сначала вырезаем fenced-блоки, чтобы разметка внутри кода не трогалась.
   function renderContent(text) {
     var src = String(text == null ? '' : text);
     var out = '';
@@ -89,17 +92,66 @@
     var last = 0;
     var m;
     while ((m = re.exec(src)) !== null) {
-      out += inlineCode(esc(src.slice(last, m.index)));
+      out += renderBlocks(src.slice(last, m.index));
       var lang = m[1] ? ' data-lang="' + esc(m[1]) + '"' : '';
       out += '<pre class="work-code"' + lang + '><code>' + esc(m[2].replace(/\n$/, '')) + '</code></pre>';
       last = re.lastIndex;
     }
-    out += inlineCode(esc(src.slice(last)));
+    out += renderBlocks(src.slice(last));
     return out;
   }
 
-  function inlineCode(escaped) {
-    return escaped.replace(/`([^`\n]+)`/g, '<code class="work-inline">$1</code>');
+  // Блочная разметка: заголовки, списки, цитаты, разделители. Остальное —
+  // абзацы с сохранением переносов (в CSS у тела сообщения white-space: pre-wrap).
+  function renderBlocks(chunk) {
+    if (!chunk) return '';
+    var lines = chunk.split('\n');
+    var html = '';
+    var listOpen = '';
+    function closeList() {
+      if (listOpen) { html += '</' + listOpen + '>'; listOpen = ''; }
+    }
+    lines.forEach(function (line) {
+      var h = line.match(/^(#{1,6})\s+(.*)$/);
+      if (h) {
+        closeList();
+        var lvl = Math.min(h[1].length + 2, 6); // ## в чате не должен быть h1
+        html += '<div class="work-h work-h' + h[1].length + '">' + inline(h[2]) + '</div>';
+        return;
+      }
+      if (/^\s*(---|\*\*\*|___)\s*$/.test(line)) { closeList(); html += '<hr class="work-hr">'; return; }
+      var ul = line.match(/^\s*[-*+]\s+(.*)$/);
+      if (ul) {
+        if (listOpen !== 'ul') { closeList(); html += '<ul class="work-ul">'; listOpen = 'ul'; }
+        html += '<li>' + inline(ul[1]) + '</li>';
+        return;
+      }
+      var ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+      if (ol) {
+        if (listOpen !== 'ol') { closeList(); html += '<ol class="work-ol">'; listOpen = 'ol'; }
+        html += '<li>' + inline(ol[1]) + '</li>';
+        return;
+      }
+      var bq = line.match(/^\s*>\s?(.*)$/);
+      if (bq) { closeList(); html += '<div class="work-bq">' + inline(bq[1]) + '</div>'; return; }
+      closeList();
+      html += inline(line) + '\n';
+    });
+    closeList();
+    return html;
+  }
+
+  // Строчная разметка поверх экранированного текста.
+  function inline(raw) {
+    var s = esc(raw);
+    s = s.replace(/`([^`\n]+)`/g, '<code class="work-inline">$1</code>');
+    s = s.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>');
+    s = s.replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>');
+    // Ссылки: только http(s), чтобы разметка не открывала произвольные схемы.
+    s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g,
+      '<a class="work-link" href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    return s;
   }
 
   // ---------- данные ----------
@@ -302,6 +354,22 @@
     return html || '<div class="work-empty">Ничего не найдено</div>';
   }
 
+  function msgHtml(m) {
+    var role = m.role === 'user' ? 'user' : 'assistant';
+    return '<div class="work-msg work-' + role + '">' +
+      '<div class="work-msg-role">' + (role === 'user' ? 'Ты' : 'Агент') + '</div>' +
+      '<div class="work-msg-body">' + renderContent(m.content) + '</div>' +
+    '</div>';
+  }
+
+  function chatUrl(id, offset) {
+    var q = '?full=1&limit=' + CHAT_PAGE;
+    if (offset !== undefined && offset !== null) q += '&offset=' + offset;
+    return '/api/session/' + encodeURIComponent(id) + q;
+  }
+
+  // Открываем сессию с ХВОСТА: тащить на фронт всю переписку незачем, а читать
+  // её начинают с конца. Верх догружается при скролле.
   function openSession(id) {
     state.selectedId = id;
     var list = document.getElementById('workList');
@@ -312,36 +380,103 @@
     for (var i = 0; i < state.sessions.length; i++) {
       if (state.sessions[i].id === id) { meta = state.sessions[i]; break; }
     }
+    state.chat = { id: id, offset: null, total: 0, loading: false };
     main.innerHTML = '<div class="work-empty">Загружаю…</div>';
-    fetch('/api/session/' + encodeURIComponent(id))
+
+    fetch(chatUrl(id))
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        var msgs = d.messages || d.detail_messages || [];
+        if (state.chat.id !== id) return;   // пользователь успел кликнуть другую
+        var msgs = d.messages || [];
+        state.chat.offset = typeof d.offset === 'number' ? d.offset : 0;
+        state.chat.total = typeof d.total === 'number' ? d.total : msgs.length;
         var live = state.live[id];
         var badge = live
           ? '<span class="work-badge ' + (live.state === 'waiting' ? 'work-need' : 'work-run') + '">' +
               (live.state === 'waiting' ? 'ждёт ответа' : 'работает') + '</span>'
           : '';
         var head = '<div class="work-chat-head">' +
-            '<div class="work-chat-title">' + esc(meta ? sessionTitle(meta) : id) + badge + '</div>' +
-            '<div class="work-chat-sub">' +
-              (meta ? esc(folderName(repoRoot(meta.git_root || meta.project))) + ' · ' + esc(fullTime(tsOf(meta))) + ' · ' : '') +
-              msgs.length + ' сообщений' +
+            '<div class="work-chat-title">' + esc(meta ? sessionTitle(meta) : id) + badge +
+              '<button id="workChatReload" class="work-btn work-chat-reload" title="Обновить чат">⟳</button>' +
+            '</div>' +
+            '<div class="work-chat-sub" id="workChatSub">' +
+              (meta ? esc(folderName(repoRoot(meta.git_root || meta.project))) + ' · ' : '') +
+              chatCounter() +
             '</div>' +
           '</div>';
-        var body = '';
-        msgs.forEach(function (m) {
-          var role = m.role === 'user' ? 'user' : 'assistant';
-          body += '<div class="work-msg work-' + role + '">' +
-            '<div class="work-msg-role">' + (role === 'user' ? 'Ты' : 'Агент') + '</div>' +
-            '<div class="work-msg-body">' + renderContent(m.content) + '</div>' +
+        main.innerHTML = head +
+          '<div class="work-chat" id="workChat">' +
+            (state.chat.offset > 0 ? '<div class="work-more work-load-older" id="workOlder">загрузить предыдущие</div>' : '') +
+            (msgs.map(msgHtml).join('') || '<div class="work-empty">Пусто</div>') +
           '</div>';
-        });
-        main.innerHTML = head + '<div class="work-chat">' + (body || '<div class="work-empty">Пусто</div>') + '</div>';
+        bindChat();
+        scrollChatToBottom();
       })
       .catch(function (e) {
         main.innerHTML = '<div class="work-empty">Не удалось загрузить сессию: ' + esc(e && e.message) + '</div>';
       });
+  }
+
+  function chatCounter() {
+    var c = state.chat;
+    var shown = c.total - (c.offset || 0);
+    return c.total ? (shown >= c.total ? c.total + ' сообщений' : shown + ' из ' + c.total) : '';
+  }
+
+  function scrollChatToBottom() {
+    var main = document.getElementById('workMain');
+    if (main) main.scrollTop = main.scrollHeight;
+  }
+
+  // Догрузка предыдущей страницы вверх — с сохранением позиции чтения.
+  function loadOlder() {
+    var c = state.chat;
+    if (!c || c.loading || !c.offset) return;
+    c.loading = true;
+    var main = document.getElementById('workMain');
+    var chat = document.getElementById('workChat');
+    var older = document.getElementById('workOlder');
+    if (older) older.textContent = 'загружаю…';
+    var nextOffset = Math.max(0, c.offset - CHAT_PAGE);
+    var heightBefore = main ? main.scrollHeight : 0;
+    fetch(chatUrl(c.id, nextOffset))
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (state.chat.id !== c.id) return;
+        var msgs = (d.messages || []).slice(0, c.offset - nextOffset);
+        c.offset = nextOffset;
+        if (chat) {
+          chat.insertAdjacentHTML('afterbegin', msgs.map(msgHtml).join(''));
+          if (older) {
+            if (c.offset > 0) older.textContent = 'загрузить предыдущие';
+            else older.remove();
+          }
+          // Держим взгляд на том же месте: прокручиваем на прирост высоты.
+          if (main) main.scrollTop += (main.scrollHeight - heightBefore);
+        }
+        var sub = document.getElementById('workChatSub');
+        if (sub && chat) sub.textContent = sub.textContent.replace(/\d+ (из \d+|сообщений)$/, chatCounter());
+      })
+      .catch(function () { if (older) older.textContent = 'не удалось загрузить'; })
+      .finally(function () { c.loading = false; });
+  }
+
+  function bindChat() {
+    var reload = document.getElementById('workChatReload');
+    if (reload) {
+      reload.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (state.chat && state.chat.id) openSession(state.chat.id);
+      });
+    }
+    var older = document.getElementById('workOlder');
+    if (older) older.addEventListener('click', loadOlder);
+    var main = document.getElementById('workMain');
+    if (main) {
+      main.addEventListener('scroll', function () {
+        if (main.scrollTop < 80) loadOlder();
+      });
+    }
   }
 
   // ---------- события ----------
@@ -488,6 +623,16 @@
     '.work-user .work-msg-body { color: var(--accent-blue); }',
     '.work-code { white-space: pre; overflow-x: auto; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin: 6px 0; font-size: 11.5px; color: var(--text-primary); }',
     '.work-inline { background: var(--bg-card); border-radius: 3px; padding: 0 4px; font-size: 11.5px; }',
+    '.work-h { font-weight: 600; color: var(--text-primary); margin: 8px 0 2px; line-height: 1.3; }',
+    '.work-h1 { font-size: 15px; } .work-h2 { font-size: 14px; } .work-h3 { font-size: 13px; }',
+    '.work-h4, .work-h5, .work-h6 { font-size: 12.5px; color: var(--text-secondary); }',
+    '.work-ul, .work-ol { margin: 4px 0 4px 18px; padding: 0; white-space: normal; }',
+    '.work-ul li, .work-ol li { margin: 1px 0; }',
+    '.work-bq { border-left: 2px solid var(--border); padding-left: 8px; color: var(--text-secondary); margin: 4px 0; }',
+    '.work-hr { border: 0; border-top: 1px solid var(--border); margin: 8px 0; }',
+    '.work-link { color: var(--accent-blue); }',
+    '.work-chat-reload { margin-left: auto; padding: 2px 7px; font-size: 12px; line-height: 1.2; }',
+    '.work-load-older { text-align: center; padding: 6px; }',
     '.work-empty { padding: 24px; color: var(--text-muted); font-size: 12px; }',
   ].join('\n');
 
