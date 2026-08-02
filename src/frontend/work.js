@@ -410,6 +410,7 @@
             (msgs.map(msgHtml).join('') || '<div class="work-empty">Пусто</div>') +
           '</div>';
         bindChat();
+        fitHeight();
         scrollChatToBottom();
       })
       .catch(function (e) {
@@ -421,6 +422,22 @@
     var c = state.chat;
     var shown = c.total - (c.offset || 0);
     return c.total ? (shown >= c.total ? c.total + ' сообщений' : shown + ' из ' + c.total) : '';
+  }
+
+  // Высоту считаем от реального положения контейнера, а не из 100vh: над видом
+  // живут панель терминалов и тулбар, и «сто процентов высоты окна» уезжают за
+  // нижнюю кромку — конец чата становится недостижим прокруткой.
+  function fitHeight() {
+    var host = document.getElementById('workView');
+    if (!host || host.style.display === 'none') return;
+    var top = host.getBoundingClientRect().top;
+    var pad = 0;
+    var parent = host.parentElement;
+    if (parent) {
+      var cs = getComputedStyle(parent);
+      pad = parseFloat(cs.paddingBottom) || 0;
+    }
+    host.style.height = Math.max(200, window.innerHeight - top - pad) + 'px';
   }
 
   function scrollChatToBottom() {
@@ -558,6 +575,7 @@
       el.classList.toggle('active', el.getAttribute('data-view') === VIEW_KEY);
     });
     startPolling();
+    fitHeight();
     if (!state.loaded) {
       host.innerHTML = '<div class="work-empty">Загружаю сессии…</div>';
       load().then(render).catch(function (e) {
@@ -580,15 +598,15 @@
   // двумя вставками в index.html и строкой в html.js. Цвета — только токенами
   // темы, чтобы вид жил и в тёмной, и в светлой, и в monokai.
   var CSS = [
-    '#workView { display: none; height: 100%; }',
-    '.work-wrap { display: grid; grid-template-columns: minmax(300px, 27%) 1fr; height: calc(100vh - 8px); overflow: hidden; }',
-    '.work-side { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; background: var(--bg-secondary); }',
+    '#workView { display: none; height: 100%; overflow: hidden; }',
+    '.work-wrap { display: grid; grid-template-columns: minmax(300px, 27%) 1fr; grid-template-rows: 100%; height: 100%; min-height: 0; overflow: hidden; }',
+    '.work-side { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; min-height: 0; height: 100%; background: var(--bg-secondary); }',
     '.work-side-head { display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); }',
     '.work-filter { flex: 1; min-width: 0; padding: 5px 8px; font: inherit; font-size: 12px; background: var(--bg-input); color: var(--text-primary); border: 1px solid var(--border); border-radius: 5px; }',
     '.work-period { padding: 4px 6px; font: inherit; font-size: 11px; background: var(--bg-input); color: var(--text-secondary); border: 1px solid var(--border); border-radius: 5px; }',
     '.work-btn { padding: 4px 9px; font-size: 13px; cursor: pointer; background: var(--bg-input); color: var(--text-secondary); border: 1px solid var(--border); border-radius: 5px; }',
     '.work-btn:hover { color: var(--text-primary); }',
-    '.work-list { flex: 1; overflow-y: auto; padding: 4px 0; }',
+    '.work-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 0; }',
     '.work-proj-head { display: flex; align-items: center; gap: 6px; padding: 5px 8px; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--text-primary); }',
     '.work-proj-head:hover { background: var(--bg-card-hover); }',
     '.work-caret { width: 10px; color: var(--text-muted); }',
@@ -609,7 +627,7 @@
     '.work-dot-run { background: var(--accent-green); box-shadow: 0 0 0 2px rgb(0 255 136 / .18); }',
     '.work-more { padding: 3px 8px 5px 22px; font-size: 11px; color: var(--text-muted); cursor: pointer; }',
     '.work-more:hover { color: var(--text-primary); text-decoration: underline; }',
-    '.work-main { overflow-y: auto; min-width: 0; background: var(--bg-primary); }',
+    '.work-main { overflow-y: auto; min-width: 0; min-height: 0; height: 100%; background: var(--bg-primary); }',
     '.work-chat-head { position: sticky; top: 0; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-primary); }',
     '.work-chat-title { font-size: 13px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }',
     '.work-badge { font-size: 9.5px; text-transform: uppercase; letter-spacing: .04em; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); }',
@@ -646,6 +664,7 @@
 
   function init() {
     injectStyles();
+    window.addEventListener('resize', fitHeight);
     document.querySelectorAll('.sidebar-item').forEach(function (el) {
       var view = el.getAttribute('data-view');
       if (view === VIEW_KEY) {
