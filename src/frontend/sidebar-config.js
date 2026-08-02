@@ -31,6 +31,8 @@
   var KNOWN_ITEM_KEYS = [
     // Landing
     'overview',
+    // FORK-LOCAL: вид «Работа» (work.js)
+    'work',
     // Workspace
     'sessions', 'workspace', 'projects', 'timeline', 'activity', 'running',
     'analytics', 'starred', 'leaderboard', 'cloud',
@@ -60,6 +62,7 @@
   var NAV_HELP = {
     // Workspace
     'overview': 'Your workspace at a glance — running terminals and quick actions',
+    'work': 'Сессии по проектам слева, чат выбранной справа — вид форка',
     'sessions': 'Every AI coding session across all agents, in one place',
     'workspace': 'A live terminal in your browser — run shells and agents without leaving codbash',
     'projects': 'Browse sessions grouped by project folder',

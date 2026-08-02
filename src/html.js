@@ -17,6 +17,7 @@ const JS_FILES = [
   'recommended.js',
   'workspace.js',
   'overview.js',
+  'work.js', // FORK-LOCAL: вид «Работа» (сессии слева, чат справа)
 ];
 
 function buildHTML() {

@@ -344,7 +344,16 @@ function startServer(host, port, openBrowser = true) {
       log('DATA', `loaded ${sessions.length} sessions${sessions._loading ? ' (cursor loading...)' : ''}`, byTool);
       // Send _loading flag as header to avoid polluting array response
       if (sessions._loading) res.setHeader('X-Loading', '1');
-      json(res, sessions);
+      // FORK-LOCAL: ?limit=N отдаёт только N самых свежих сессий. Полный список
+      // здесь — 2548 записей / 2.3 МБ, и клиент, которому нужен лишь верх списка,
+      // ждёт секунды на пустом экране. Массив уже отсортирован по свежести,
+      // поэтому достаточно среза. Без параметра поведение прежнее.
+      const limitParam = parseInt(parsed.searchParams.get('limit') || '0', 10);
+      const limited = limitParam > 0 && sessions.length > limitParam
+        ? sessions.slice(0, limitParam)
+        : sessions;
+      if (limited !== sessions) res.setHeader('X-Total-Sessions', String(sessions.length));
+      json(res, limited);
     }
 
     else if (req.method === 'GET' && pathname.startsWith('/api/session/') && !pathname.includes('/export')) {

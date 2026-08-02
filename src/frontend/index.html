@@ -42,6 +42,11 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg>
         Overview
     </div>
+    <!-- FORK-LOCAL: вид «Работа» — сессии по проектам слева, чат справа (work.js). -->
+    <div class="sidebar-item" data-view="work" data-key="work">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="7" height="16" rx="1"/><rect x="13" y="4" width="8" height="16" rx="1"/><line x1="15" y1="9" x2="19" y2="9"/><line x1="15" y1="13" x2="19" y2="13"/></svg>
+        Работа
+    </div>
     <div class="sidebar-item" data-view="workspace" data-key="workspace">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="18" rx="2"/><polyline points="6 8 9 11 6 14"/><line x1="12" y1="15" x2="17" y2="15"/></svg>
         Terminal
@@ -264,6 +269,8 @@
         <span class="stats" id="stats"></span>
     </div>
     <div class="content" id="content"></div>
+    <!-- FORK-LOCAL: контейнер вида «Работа»; work.js прячет #content и показывает его. -->
+    <div id="workView"></div>
 </div>
 
 <div class="overlay" id="overlay" onclick="closeDetail()"></div>
