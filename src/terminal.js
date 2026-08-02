@@ -231,6 +231,28 @@ function resolveCwd(url, isSafeCwd) {
   return { cwd: os.homedir(), requested: expanded, fellBack: true };
 }
 
+// Pick the shell for a pane. Returns an executable name or path.
+//
+// SHELL is a POSIX variable. On Windows nothing sets it in a normal user
+// environment — when it IS set there, it leaked in from an MSYS environment
+// (a Git Bash session, or a service inheriting one: `pm2 restart` run from
+// Git Bash bakes SHELL=C:\Program Files\Git\usr\bin\bash.exe into the daemon's
+// env, where it then outlives that shell). Honoring it spawns MSYS bash under
+// ConPTY — double emulation that is markedly slower than the native shell,
+// worst of all on the TUI repaints an agent produces. The user never asked for
+// it and has no way to tell why their terminal got slow.
+//
+// So: on Windows SHELL is ignored and the native shell wins. Anyone who does
+// want a specific shell sets CODBASH_SHELL, which is explicit and works on
+// every platform.
+function resolveShell(platform, env) {
+  platform = platform || process.platform;
+  env = env || process.env;
+  if (env.CODBASH_SHELL) return env.CODBASH_SHELL;
+  if (platform === 'win32') return 'powershell.exe';
+  return env.SHELL || 'bash';
+}
+
 // Attach the upgrade handler + spawn a pty per connection.
 // opts: { isSafeCwd, log }
 function handleUpgrade(req, socket, head, opts) {
@@ -278,7 +300,7 @@ function handleUpgrade(req, socket, head, opts) {
 
   const resolved = resolveCwd(url, opts.isSafeCwd);
   const cwd = resolved.cwd;
-  const shell = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : 'bash');
+  const shell = resolveShell();
   const cols = parseInt(url.searchParams.get('cols'), 10) || 80;
   const rows = parseInt(url.searchParams.get('rows'), 10) || 24;
 
@@ -386,6 +408,7 @@ module.exports = {
   createFrameDecoder: createFrameDecoder,
   tokensMatch: tokensMatch,
   resolveCwd: resolveCwd,
+  resolveShell: resolveShell,
   sanitizedPtyEnv: sanitizedPtyEnv,
   AGENT_SESSION_ENV_RE: AGENT_SESSION_ENV_RE
 };

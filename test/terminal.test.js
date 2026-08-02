@@ -121,6 +121,30 @@ test('sanitizedPtyEnv strips inherited agent-session markers', () => {
   }
 });
 
+// ── resolveShell: SHELL is POSIX-only; on Windows it means a leaked MSYS env ──
+// Regression guard: a `pm2 restart` issued from Git Bash baked
+// SHELL=C:\Program Files\Git\usr\bin\bash.exe into the service env, so every
+// browser pane silently spawned MSYS bash under ConPTY instead of PowerShell.
+test('resolveShell ignores a leaked MSYS SHELL on Windows', () => {
+  const env = { SHELL: 'C:\\Program Files\\Git\\usr\\bin\\bash.exe' };
+  assert.equal(terminal.resolveShell('win32', env), 'powershell.exe');
+});
+
+test('resolveShell falls back to the native shell on Windows with no SHELL', () => {
+  assert.equal(terminal.resolveShell('win32', {}), 'powershell.exe');
+});
+
+test('resolveShell honors SHELL on POSIX', () => {
+  assert.equal(terminal.resolveShell('darwin', { SHELL: '/bin/zsh' }), '/bin/zsh');
+  assert.equal(terminal.resolveShell('linux', {}), 'bash');
+});
+
+test('CODBASH_SHELL is the explicit override and wins everywhere', () => {
+  const env = { CODBASH_SHELL: 'C:\\Program Files\\Git\\bin\\bash.exe', SHELL: '/bin/zsh' };
+  assert.equal(terminal.resolveShell('win32', env), 'C:\\Program Files\\Git\\bin\\bash.exe');
+  assert.equal(terminal.resolveShell('linux', env), 'C:\\Program Files\\Git\\bin\\bash.exe');
+});
+
 // ── resolveCwd: honor real dirs, flag fallback (never silently misfile) ───────
 test('resolveCwd honors an existing real directory (even with () chars)', () => {
   const os = require('os');
