@@ -41,17 +41,28 @@ function encodeCwd(cwd) {
   return String(cwd || '').replace(/[^a-zA-Z0-9]/g, '-');
 }
 
+// Путь транскрипта дорог только в первый раз: прямое попадание — один stat,
+// а фолбэк обходит все папки ~/.claude/projects (их 159). Опрос идёт каждые
+// несколько секунд, поэтому результат — включая «не нашли» — кэшируем.
+const pathCache = new Map();
+
 function transcriptPath(sessionId, cwd) {
+  if (pathCache.has(sessionId)) return pathCache.get(sessionId);
+  let found = '';
   const direct = path.join(PROJECTS_DIR, encodeCwd(cwd), sessionId + '.jsonl');
-  if (fs.existsSync(direct)) return direct;
-  // Фолбэк: сессию могли перепривязать к другой папке (/cd) — ищем по имени.
-  try {
-    for (const dir of fs.readdirSync(PROJECTS_DIR)) {
-      const p = path.join(PROJECTS_DIR, dir, sessionId + '.jsonl');
-      if (fs.existsSync(p)) return p;
-    }
-  } catch { /* нет каталога — вернём пусто */ }
-  return '';
+  if (fs.existsSync(direct)) {
+    found = direct;
+  } else {
+    // Фолбэк: сессию могли перепривязать к другой папке (/cd) — ищем по имени.
+    try {
+      for (const dir of fs.readdirSync(PROJECTS_DIR)) {
+        const p = path.join(PROJECTS_DIR, dir, sessionId + '.jsonl');
+        if (fs.existsSync(p)) { found = p; break; }
+      }
+    } catch { /* нет каталога — останется пусто */ }
+  }
+  pathCache.set(sessionId, found);
+  return found;
 }
 
 function readTail(file) {

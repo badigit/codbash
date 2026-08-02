@@ -2973,7 +2973,13 @@ function getProjectGitInfo(projectPath) {
 
 let _sessionsCache = null;
 let _sessionsCacheTs = 0;
-const SESSIONS_CACHE_TTL = 60000; // 60 seconds — hot cache, invalidated by file changes
+// FORK-LOCAL: было 60 c. При активной работе агентов транскрипты пишутся
+// непрерывно, поэтому кэш инвалидировался почти на каждый запрос, а пересбор
+// 2548 сессий синхронный — на это время встаёт весь сервер (Node однопоточный;
+// замер: /api/version отвечал 32 c). Пять минут — компромисс: список сессий
+// может отставать, зато интерфейс не подвисает. Свежесть живых сессий даёт
+// отдельный /api/work/live, кнопка обновления перечитывает список принудительно.
+const SESSIONS_CACHE_TTL = 300000;
 
 // Track file mtimes for smart invalidation
 let _historyMtime = 0;

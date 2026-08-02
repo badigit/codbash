@@ -12,7 +12,7 @@
   var VIEW_KEY = 'work';
   var OPEN_PROJECTS = 3;    // сколько верхних проектов развёрнуто на старте
   var PAGE = 12;            // сессий в проекте до кнопки «ещё»
-  var LIVE_POLL_MS = 15000; // как часто обновляем состояние живых сессий
+  var LIVE_POLL_MS = 30000; // как часто обновляем состояние живых сессий
   var CHAT_PAGE = 40;       // сообщений в одной странице чата
   var PERIODS = [
     { key: 7, label: '7 дней' },
@@ -362,8 +362,16 @@
     '</div>';
   }
 
+  // project обязателен: без него сервер ищет транскрипт перебором всех папок
+  // ~/.claude/projects (у нас их 159) и ответ растягивается на секунды.
+  // Легаси-детали передают его по той же причине.
   function chatUrl(id, offset) {
+    var meta = null;
+    for (var i = 0; i < state.sessions.length; i++) {
+      if (state.sessions[i].id === id) { meta = state.sessions[i]; break; }
+    }
     var q = '?full=1&limit=' + CHAT_PAGE;
+    if (meta && meta.project) q += '&project=' + encodeURIComponent(meta.project);
     if (offset !== undefined && offset !== null) q += '&offset=' + offset;
     return '/api/session/' + encodeURIComponent(id) + q;
   }
