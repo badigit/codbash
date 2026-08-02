@@ -6,6 +6,7 @@ const { exec, execFile, execFileSync } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 const dataApi = require('./data');
+const workLive = require('./work-live'); // FORK-LOCAL: живые сессии на Windows
 const { loadSessions, loadSessionDetail, deleteSession, getGitCommits, exportSessionMarkdown, getSessionPreview, searchFullText, getActiveSessions, getSessionReplay, getCostAnalytics, computeSessionCost, getProjectGitInfo, getLeaderboardStats } = dataApi;
 const { detectTerminals, openInTerminal, focusTerminalByPid, isWSL } = require('./terminals');
 const { convertSession } = require('./convert');
@@ -354,6 +355,18 @@ function startServer(host, port, openBrowser = true) {
         : sessions;
       if (limited !== sessions) res.setHeader('X-Total-Sessions', String(sessions.length));
       json(res, limited);
+    }
+
+    // FORK-LOCAL: живые сессии с состоянием (working/waiting). Апстримный
+    // /api/active на Windows всегда пуст — getActiveSessions() построен на
+    // ps/lsof и выходит сразу. Здесь читаем реестр самого Claude Code
+    // (~/.claude/sessions/<pid>.json) и хвост транскрипта. См. src/work-live.js.
+    else if (req.method === 'GET' && pathname === '/api/work/live') {
+      try {
+        json(res, workLive.getLiveSessions());
+      } catch (e) {
+        json(res, { error: String(e && e.message || e) }, 500);
+      }
     }
 
     else if (req.method === 'GET' && pathname.startsWith('/api/session/') && !pathname.includes('/export')) {
