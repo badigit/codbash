@@ -7,6 +7,9 @@
 // answers, then points a BrowserWindow at it.
 'use strict';
 
+// До остальных require: Electron — GUI-родитель без консоли, его потомки (node, git)
+// иначе получают своё окно. Канон — _my_llm-skills-agents/scripts/hide-console-window.mjs.
+require('../src/hide-console-window');
 const { app, BrowserWindow, shell, dialog, Menu, ipcMain } = require('electron');
 const { spawn } = require('child_process');
 const http = require('http');

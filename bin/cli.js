@@ -1,5 +1,11 @@
 #!/usr/bin/env node
 
+// Первой строкой: codbash поднимается фоновым стаком PM2 и из Electron-обёртки —
+// у обоих родителей консоли нет, поэтому консольный потомок (git, npm, редактор)
+// получал бы своё окно. windowsHide по месту здесь уже расставлен во многих
+// вызовах, патч закрывает остальные и будущие.
+require('../src/hide-console-window');
+
 // Node.js version check — codbash requires Node >= 18
 var nodeVersion = parseInt(process.versions.node.split('.')[0], 10);
 if (nodeVersion < 18) {
