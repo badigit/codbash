@@ -20,6 +20,10 @@ module.exports = {
       windowsHide: true,
       autorestart: true,
       max_restarts: 10,
+      // min_uptime: умер раньше — рестарт считается аварийным (без него max_restarts не работает,
+      // PM2 сбрасывает счётчик на каждом «штатном» падении). exp_backoff: пауза растёт до 15 с.
+      min_uptime: 60000,
+      exp_backoff_restart_delay: 2000,
       restart_delay: 3000,
       watch: false,
     },
